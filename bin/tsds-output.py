@@ -1,193 +1,296 @@
 #!/usr/bin/python3
+import sys, re, json, yaml, requests
 
-import sys
-import json, yaml
-import re
-import requests
-
-print("args are %s " % sys.argv)
 
 if len(sys.argv) < 2:
-    print("Usage: %s <config file>" % sys.argv[0])
+    print("Usage: {} <config file>".format(sys.argv[0]))
     sys.exit(1)
+else:
+    print("Received arguments: {}".format(sys.argv))
+    config_file = sys.argv[1]
 
-config_file = sys.argv[1]
+
+def log(msg, dump=False):
+    msg = json.dumps(msg, indent=4) if dump else msg
+    print(msg)
+
 
 def main():    
 
-    config          = TSDSConfig(config_file)
-    datatransformer = DataTransformer(config)
+    print("Starting TSDS-Telegraf Output Plugin")
 
-    block = []
+    # Read the YAML configuration
+    with open(config_file) as f:
+        config = yaml.load(f)
 
+    # Instantiate a TSDS Push Client and DataTransform object
+    TSDS = Client(config.get('tsds'))
+    DT   = DataTransformer(config.get('collections'))
+
+    # Batch array for incoming JSON storage
+    batch = []
+
+    # Process each line from STDIN
     for line in sys.stdin:
-        #print("I got a line %s" % line)
 
-        # Example line:
-        # {"fields":{"ifAdminStatus":1,"ifInDiscards":0,"ifInErrors":0,"ifInNUcastPkts":0,"ifInOctets":0,"ifInUcastPkts":0,"ifInUnknownProtos":0,"ifLastChange":898273758,"ifMtu":2147483647,"ifOperStatus":1,"ifOutDiscards":0,"ifOutErrors":0,"ifOutNUcastPkts":0,"ifOutOctets":0,"ifOutQLen":0,"ifOutUcastPkts":0,"ifPhysAddress":"3c:61:04:07:bb:c0","ifSpecific":".0.0","ifSpeed":4294967295,"ifType":161},"name":"interface","tags":{"agent_host":"rtr.ipiu.ilight.net","host":"io3.bldc.grnoc.iu.edu","ifDescr":"ae0.32767","ifIndex":"518","ifName":"ae0.32767"},"timestamp":1606510153}
+        # Applies any data transformations and rate calculations
+        # Provides an array of data dicts to add to the batch
+        updates = DT.transform(line)
 
-        try:
-            data = json.loads(line)
-        except:
-            print("Unable to parse line = \"%s\", skipping" % line)
+        if len(updates) == 0:
+            print('Line from STDIN did not produce any update messages: {}'.format(line))
             continue
 
-        # rename everything, apply counters, etc. Adds a fully
-        # formed TSDS update message to the `block` list
-        datatransformer.update(data, block)
+        # Adds the resulting TSDS update dicts to the batch
+        batch.extend(updates)
 
-        if len(block) >= 10:
-            _send_data(config, block)
-            block = []
+        # Push the updates batch once it has reached an appropriate size
+        if len(batch) >= 10:
 
+            err = TSDS.push(batch)
+            batch = []
 
-def _send_data(config, data):
-    try:
-        json_data  = json.dumps(data)
-    except:
-        print("***************** Bad data was %s ***************" % data)
-        sys.exit(1)
-        return
-    tsds_creds = config.credentials()
-    result     = requests.post(tsds_creds['url'] + "/services/push.cgi", 
-                               data = {"method": "add_data", "data": json_data}, 
-                               auth = (tsds_creds['username'], tsds_creds['password']))
-
-    # TODO: error handling here, at least log it
-    #print(result.text)
+            if err:
+                sys.exit(err) 
 
 
-# Some helper classes
+class Client(object):
 
-class TSDSConfig(object):
-    def __init__(self, config_file):
-        # TODO: some sort of sanity checking here
-        with open(config_file) as f:
-            self.config = yaml.load(f)
-        
-    def types(self):
-        return [x['telegraf_name'] for x in self.config['data']]
-
-    def credentials(self):
-        return self.config['credentials']
-
-    def data_config(self, telegraf_name):
-        for data_type in self.config['data']:
-            if data_type['telegraf_name'] == telegraf_name:
-                return data_type
-        return None
-
-class DataTransformer(object):
-    # More than meets the eye
     def __init__(self, config):
-        self.config = config
-        self.cache  = {}
+        print("Initializing Client instance")
 
-    def update(self, data, block):
-        name      = data['name']
-        fields    = data['fields']
-        tags      = data['tags']
-        timestamp = data['timestamp']
+        self.username = config.get('username')
+        self.password = config.get('password')
+        self.url      = config.get('url')
+        self.timeout  = config.get('timeout')
 
-        data_config = self.config.data_config(name)
+    # Username Get & Set
+    @property
+    def username(self):
+        return self.__username
+    @username.setter
+    def username(self, username):
+        self.__username = username
 
-        # Some data type we don't know about, skip it
-        # Possibly a misconfig
-        if not data_config:
-            print("Ignoring unknown data type = %s" % name)
-            return None
+    # Password Get & Set
+    @property
+    def password(self):
+        return self.__password
+    @password.setter
+    def password(self, password):
+        self.__password = password
 
-        interval = data_config['interval']
+    # URL Get & Set
+    @property
+    def url(self):
+        return self.__url
+    @url.setter
+    def url(self, url):
+        url = url if url[-1] != '/' else url[:-1]
+        self.__url = url
 
-        # Pull out the metadata from the "tags" element
-        # This effectively renames + pulls out the value
-        metadata = {}
-        for config in data_config['metadata']:
-            metadata[config['to']] = tags[config['from']]
+    # Timeout Get & Set
+    @property
+    def timeout(self):
+        return self.__timeout
+    @timeout.setter
+    def timeout(self, timeout):
+        self.__timeout = int(timeout) if timeout else 15
 
+    # Takes data and pushes its JSON string to TSDS via POST
+    # Return will evaluate to true if an error occurred
+    def push(self, data):
+       
+        # Stringify the data for POSTing
+        try:
+            data_str = json.dumps(data)
+        except RuntimeError as e:
+            print('Error while attempting to create JSON string from data: {}\n{}'.format(data, e))
+            return 1
 
-        # Now we have our metadata structures all renamed, 
-        # grab our local cache so we can process values
-        # and convert to rates if needed
+        # Create the data dict for requests to POST
+        post_data = {'method': 'add_data', 'data': data_str}
 
-        # initialize this measurement type cache if needed
-        meas_cache = self.cache.setdefault(name, {})
-        cache_key  = "".join(sorted(metadata.values()))
-        cache      = meas_cache.setdefault(cache_key, {})
+        # POST the data to the TSDS push service URL
+        try:
+            res = requests.post(\
+                self.url,\
+                data=post_data,\
+                auth=(self.username, self.password),\
+                timeout=self.timeout\
+            )
+        except RuntimeError as e:
+            print('Error while attempting to POST data: {}'.format(e))
+            return 1
 
+        # TODO: Check the result of the request here
+        if not res.ok:
+            print('Received an error response while attempting to POST data: {}'.format(data_str))
+            print(res.reason)
+            print(res.text)
+        else:
+            print('Successfully pushed {} updates to TSDS'.format(len(data)))
+        return
+        
+        
+class DataTransformer(object):
 
-        # And now the data fields, same deal except from the "fields"
-        data_fields = {}
-        for config in data_config['fields']:
-            value = fields[config['from']]
+    # More than meets the eye
+    def __init__(self, collections):
+        print("Initializing DataTransformer instance")
+        self.collections = collections
+        self.cache       = {}
 
-            if config.get('rate'):
-                value = self._calculate_rate(cache, config['to'], timestamp, value, interval)
+    # Collections Get & Set
+    @property
+    def collections(self):
+        return self.__collections
+    @collections.setter
+    def collections(self, collections):
+        self.__collections = collections
 
-            data_fields[config['to']] = value
+    # Cache Get & Set
+    @property
+    def cache(self):
+        return self.__cache
+    @cache.setter
+    def cache(self, cache):
+        self.__cache = cache if isinstance(cache,dict) else dict()
 
+    # Transforms a JSON string from Telegraf into a list of data dicts for TSDS ingestion
+    def transform(self, json_str):
 
-        tsds_data_name = data_config["tsds_name"]
+        # Returned output will be a list of data dicts
+        output = []
 
+        # Attempt to load the JSON string as a dict
+        try:
+            data = json.loads(json_str)
+        except RuntimeError as e:
+            print('Unable to parse JSON string from STDIN, skipping ({}): {}'.format(line, e))
+            return output
+
+        # Get the Telegraf data components
+        name      = data.get('name')
+        fields    = data.get('fields')
+        tags      = data.get('tags')
+        timestamp = data.get('timestamp')
+
+        # Get the collection configuration by using its name from the data
+        collection = self.collections.get(name)
+
+        # Check whether the collection type has configurations
+        if not collection:
+            raise NameError('Collection "{}" is not configured!'.format(name))
+            return output
+
+        interval = collection.get('interval')
+
+        # Create a dict of the metadata TSDS names mapped to the values from Telegraf
+        # Telegraf tags are a map of metadata fieldnames to their values
+        metadata = {c.get('to'): tags.get(c.get('from')) for c in collection.get('metadata',[])}
+
+        # Initialize a cache for the collection type when it doesn't exist
+        if name not in self.cache:
+            self.cache[name] = {}
+
+        # Get or create a dict for the metadata combination within the collection type's cache
+        # This dict is used for value processing
+        meta_key    = "".join(sorted(metadata.values()))
+        cache_entry = self.cache[name].setdefault(meta_key, {})
+
+        # Use the Telegraf field maps to build value data for TSDS
+        values = {}
+        for field_map in collection.get('fields', []):
+            
+            field_name = field_map['from']
+            value_name = field_map['to']
+
+            # Pull the value for the Telegraf field
+            value = fields.get(field_name, None)
+
+            # TODO: How should missing field_names be handled?
+            # Verify that we have a value for the requested field_name
+            if value is None:
+                log('No value for requested field name "{}"'.format(field_name))
+                values[value_name] = value
+                next
+
+            # Apply rate calculations
+            if field_map.get('rate', False):
+                value = self._calculate_rate(\
+                    cache_entry,\
+                    value_name,\
+                    timestamp,\
+                    value,\
+                    collection.get('interval')\
+                )
+
+            # Set the value data for the TSDS value name
+            values[value_name] = value
+
+        # Create a dict of data to push to TSDS and add it to the output
         tsds_data = {
-            "meta": metadata,
-            "time": timestamp,
-            "values": data_fields,
-            "interval": interval,
-            "type": tsds_data_name
+            "meta":     metadata,
+            "time":     timestamp,
+            "values":   values,
+            "interval": collection.get('interval'),
+            "type":     collection.get('tsds_name')
         }
-        #print("Data = %s" % tsds_data)
+        output.append(tsds_data)
 
-        block.append(tsds_data)
+        # Return here unless we want optional metadata
+        if 'optional_metadata' not in collection:
+            return output
 
-        # if we have any additional metadata fields, we'll process them as a separate message        
-        if "optional_metadata" in data_config:
+        # Flag to indicate optional metadata fields are present
+        has_opt = False
 
-            # These fields aren't always there, so we have to make sure first
-            has_any = False            
+        # Check for any optional metadata in the Telegraf tags
+        for opt_meta in collection.get('optional_metadata', []):
 
-            for opt_config in data_config["optional_metadata"]:
-                opt_to   = opt_config['to']
-                opt_from = opt_config['from']
+            tag_name  = opt_meta['from']
+            meta_name = opt_meta['to']
 
-                # Handle wildcarding, we're building an array
-                if "*" in opt_from:
-                    array = []                                   
+            # Absolute match for tag names
+            if tag_name in tags:
+                metadata[meta_name] = tags[tag_name]
 
-                    for tag in tags:
-                        if re.match(opt_from, tag):
-                            if opt_config.get('field_name'):
-                                array.append({opt_config['field_name']: tags[tag]})
-                            else:
-                                array.append(tags[tag])
+            # Wildcard matching for tag names
+            elif "*" in tag_name:
 
-                    if array:
-                        metadata[opt_to] = array
-                        has_any = True
+                # Get the data for each Telegraf tag that matches our wildcard
+                optional_metadata = [tags[t] for t in tags if re.match(tag_name, t)]
 
-                elif opt_from in tags:
-                    metadata[opt_to] = tags[opt_from]
-                    has_any = True
+                # Map matches to a specified field_name if configured
+                if opt_meta.get('field_name'):
+                    optional_metadata = [{opt_meta['field_name']: m} for m in optional_metadata]
 
-            if has_any:
-                metadata_data = {
-                    "meta": metadata,
-                    "time": timestamp,
-                    "type": tsds_data_name + ".metadata"
-                }
+                if len(optional_metadata):
+                    metadata[meta_name] = optional_metadata
+                    has_opt = True
 
-                #print("Optional meta = %s" % metadata_data)
+        # Add a separate object for optional metadata to the output for TSDS
+        if has_opt:
+            metadata_data = {
+                "meta": metadata,
+                "time": timestamp,
+                "type": collection.get('tsds_name') + ".metadata"
+            }
+            output.append(metadata_data)
 
-                block.append(metadata_data)
+        #print('Transform produced the following data: {}'.format(json.dumps(output, indent=4)))
+            
+        return output
 
 
-    def _calculate_rate(self, cache, value_name, timestamp, value, interval):
+    def _calculate_rate(self, cache_entry, value_name, timestamp, value, interval):
 
         if value is None:
             return None
 
-        (last_timestamp, last_value) = cache.setdefault(value_name, (timestamp, None))
-        cache[value_name] = (timestamp, value)
+        (last_timestamp, last_value) = cache_entry.setdefault(value_name, (timestamp, None))
+        cache_entry[value_name] = (timestamp, value)
 
         # If we didn't have any prior entries, can't calculate
         if last_value is None:
