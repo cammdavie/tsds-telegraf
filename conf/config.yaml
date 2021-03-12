@@ -1,9 +1,17 @@
---- 
+---
+# Logging
+logging:
+  debug: False
+  file: '/path/to/logfile'
+
+# TSDS Push Service
 tsds:
   url: "https://yourserver.com/tsds-basic/"
   username: "username"
   password: "password"
+  timeout: 15
 
+# Collections of Telegraf Metric to TSDS Measurement Configurations
 collections:
   interface:
     tsds_name: interface

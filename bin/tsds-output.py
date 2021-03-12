@@ -1,31 +1,26 @@
 #!/usr/bin/python3
-import sys, re, json, yaml, requests
+import sys, re, json, yaml, logging, requests
 
 
 if len(sys.argv) < 2:
     print("Usage: {} <config file>".format(sys.argv[0]))
     sys.exit(1)
 else:
-    print("Received arguments: {}".format(sys.argv))
     config_file = sys.argv[1]
 
 
-def log(msg, dump=False):
-    msg = json.dumps(msg, indent=4) if dump else msg
-    print(msg)
-
-
 def main():    
-
-    print("Starting TSDS-Telegraf Output Plugin")
 
     # Read the YAML configuration
     with open(config_file) as f:
         config = yaml.load(f)
 
-    # Instantiate a TSDS Push Client and DataTransform object
-    TSDS = Client(config.get('tsds'))
-    DT   = DataTransformer(config.get('collections'))
+    # Instantiate a Log, TSDS Push Client, and DataTransform object
+    L    = Log(config.get('logging', {}))
+    TSDS = Client(config.get('tsds'), L)
+    DT   = DataTransformer(config.get('collections'), L)
+
+    L.info('Initialized TSDS-Telegraf execd plugin')
 
     # Batch array for incoming JSON storage
     batch = []
@@ -33,12 +28,14 @@ def main():
     # Process each line from STDIN
     for line in sys.stdin:
 
+        L.debug('Received input from STDIN')
+
         # Applies any data transformations and rate calculations
         # Provides an array of data dicts to add to the batch
         updates = DT.transform(line)
 
         if len(updates) == 0:
-            print('Line from STDIN did not produce any update messages: {}'.format(line))
+            L.warn('Line from STDIN did not produce any update messages: {}'.format(line))
             continue
 
         # Adds the resulting TSDS update dicts to the batch
@@ -54,15 +51,85 @@ def main():
                 sys.exit(err) 
 
 
-class Client(object):
+class Log(object):
 
     def __init__(self, config):
-        print("Initializing Client instance")
 
+        log_file     = config.get('file')
+        enable_debug = config.get('debug')
+
+        # Instantiate a Logger and StreamHandler for it
+        logger = logging.getLogger('tsds-telegraf')
+        sh     = logging.StreamHandler()
+
+        # Set the logfile
+        if log_file:
+            logging.basicConfig(filename=log_file)
+
+        # Set the logging level
+        if enable_debug:
+            logger.setLevel(logging.DEBUG)
+            sh.setLevel(logging.DEBUG)
+        else:
+            logger.setLevel(logging.INFO)
+            sh.setLevel(logging.INFO)
+
+        # Define the log output format and then add the StreamHandler to the Logger
+        sh.setFormatter(logging.Formatter('[%(name)s] [%(levelname)s]: %(message)s'))
+        logger.addHandler(sh)
+
+        self.logger = logger
+
+    # Logger Get & Set
+    @property
+    def logger(self):
+        return self.__logger
+    @logger.setter
+    def logger(self, logger):
+        self.__logger = logger
+
+    # Helper method to pretty print data structures
+    def _dumper(self, data):
+        try:
+            return json.dumps(data)
+        except TypeError as e:
+            self.logger.error('Could not create data dump for logging: {}'.format(e))
+            return data
+
+    # Define the logging methods of the configured logger
+    # The check is an optimization to reduce message evaluation
+    # Error logging is always available and has no check
+    def debug(self, msg, dump=False):
+        if self.logger.isEnabledFor(logging.DEBUG):
+            msg = self._dumper(msg) if dump else msg
+            self.logger.debug(msg)
+
+    def info(self, msg, dump=False):
+        if self.logger.isEnabledFor(logging.INFO):
+            msg = self._dumper(msg) if dump else msg
+            self.logger.info(msg)
+
+    def warn(self, msg, dump=False):
+        if self.logger.isEnabledFor(logging.WARNING):
+            msg = self._dumper(msg) if dump else msg
+            self.logger.warning(msg)
+
+    def error(self, msg, dump=False):
+        msg = self._dumper(msg) if dump else msg
+        self.logger.error(msg)
+
+
+class Client(object):
+
+    def __init__(self, config, log):
+        
         self.username = config.get('username')
         self.password = config.get('password')
         self.url      = config.get('url')
         self.timeout  = config.get('timeout')
+
+        self.log = log
+        self.log.debug('Initialized Client instance')
 
     # Username Get & Set
     @property
@@ -97,6 +164,14 @@ class Client(object):
     def timeout(self, timeout):
         self.__timeout = int(timeout) if timeout else 15
 
+    # Log Get & Set
+    @property
+    def log(self):
+        return self.__log
+    @log.setter
+    def log(self, log):
+        self.__log = log
+
     # Takes data and pushes its JSON string to TSDS via POST
     # Return will evaluate to true if an error occurred
     def push(self, data):
@@ -105,7 +180,7 @@ class Client(object):
         try:
             data_str = json.dumps(data)
         except RuntimeError as e:
-            print('Error while attempting to create JSON string from data: {}\n{}'.format(data, e))
+            self.log.error('Error while attempting to create JSON string from data: {}\n{}'.format(data, e))
             return 1
 
         # Create the data dict for requests to POST
@@ -120,26 +195,27 @@ class Client(object):
                 timeout=self.timeout\
             )
         except RuntimeError as e:
-            print('Error while attempting to POST data: {}'.format(e))
+            self.log.error('Error while attempting to POST data: {}'.format(e))
             return 1
 
-        # TODO: Check the result of the request here
         if not res.ok:
-            print('Received an error response while attempting to POST data: {}'.format(data_str))
-            print(res.reason)
-            print(res.text)
+            self.log.error('Received an error response while attempting to POST data: {}'.format(data_str))
+            self.log.debug(res.reason)
+            self.log.debug(res.text)
         else:
-            print('Successfully pushed {} updates to TSDS'.format(len(data)))
+            self.log.info('Pushed {} updates to TSDS'.format(len(data)))
         return
         
         
 class DataTransformer(object):
 
     # More than meets the eye
-    def __init__(self, collections):
-        print("Initializing DataTransformer instance")
+    def __init__(self, collections, log):
         self.collections = collections
+        self.log         = log
         self.cache       = {}
+
+        self.log.debug('Initialized DataTransformer instance')
 
     # Collections Get & Set
     @property
@@ -148,6 +224,14 @@ class DataTransformer(object):
     @collections.setter
     def collections(self, collections):
         self.__collections = collections
+
+    # Log Get & Set
+    @property
+    def log(self):
+        return self.__log
+    @log.setter
+    def log(self, log):
+        self.__log = log
 
     # Cache Get & Set
     @property
@@ -167,7 +251,7 @@ class DataTransformer(object):
         try:
             data = json.loads(json_str)
         except RuntimeError as e:
-            print('Unable to parse JSON string from STDIN, skipping ({}): {}'.format(line, e))
+            self.log.error('Unable to parse JSON string from STDIN, skipping ({}): {}'.format(line, e))
             return output
 
         # Get the Telegraf data components
@@ -181,7 +265,7 @@ class DataTransformer(object):
 
         # Check whether the collection type has configurations
         if not collection:
-            raise NameError('Collection "{}" is not configured!'.format(name))
+            self.log.error('Collection "{}" is not configured!'.format(name))
             return output
 
         interval = collection.get('interval')
@@ -212,7 +296,7 @@ class DataTransformer(object):
             # TODO: How should missing field_names be handled?
             # Verify that we have a value for the requested field_name
             if value is None:
-                log('No value for requested field name "{}"'.format(field_name))
+                Log.error('No value for requested field name "{}"'.format(field_name))
                 values[value_name] = value
                 next
 
@@ -279,7 +363,8 @@ class DataTransformer(object):
             }
             output.append(metadata_data)
 
-        #print('Transform produced the following data: {}'.format(json.dumps(output, indent=4)))
+        self.log.debug('Transform produced the following data:')
+        self.log.debug(output, True)
             
         return output
 
@@ -305,7 +390,6 @@ class DataTransformer(object):
             return None
 
         delta_value = value - last_value;
-
 
         # Handle overflow / reset here, counters shouldn't go down normally
         if value < last_value:
