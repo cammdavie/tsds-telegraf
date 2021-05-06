@@ -1,0 +1,168 @@
+---
+logging:
+  debug: false
+      
+client:
+  url: 'https://my.services.host/tsds-basic/services/push.cgi'
+  username: ''
+  password: ''
+
+batch_size: 100
+
+collections:
+
+  intf:
+    tsds_name: interface
+    interval: 60
+    metadata:
+      - from: 'source'
+        to: 'node'
+      - from: 'interface_name'
+        to: 'intf'
+    fields:
+      - from: 'input_bits'
+        to: input
+        rate: True
+      - from: 'output_bits'
+        to: output
+        rate: True
+      - from: 'input_errors'
+        to: inerror
+        rate: True
+      - from: 'output_errors'
+        to: outerror
+        rate: True
+      - from: 'input_drops'
+        to: indiscard
+        rate: True
+      - from: 'output_drops'
+        to: outdiscard
+        rate: True
+      - from: 'packets_received'
+        to: inUcast
+        rate: True
+      - from: 'packets_sent'
+        to: outUcast
+        rate: True
+
+  memory:
+    tsds_name: memory
+    interval: 60
+    metadata:
+      - from: 'source'
+        to: 'node'
+      - from: 'node_name'
+        to: 'name'
+    fields:
+      - from: 'percent_used'
+        to: 'memory'
+
+  cpu:
+    tsds_name: cpu
+    interval: 60
+    metadata:
+      - from: 'source'
+        to: 'node'
+      - from: 'node_name'
+        to: 'name'
+    fields:
+      - from: 'total_cpu_one_minute'
+        to: 'cpu'
+
+  optical:
+    tsds_name: optical
+    interval: 60
+    metadata:
+      - from: 'source'
+        to: 'node'
+      - from: 'name'
+        to: 'intf'
+    fields:
+      - from: 'lane_data/receive_power'
+        to: 'rx_power'
+      - from: 'lane_data/transmit_power'
+        to: 'tx_power'
+
+  bgp:
+    tsds_name: bgp_prefixes
+    interval: 60
+    metadata:
+      - from: 'source'
+        to: 'node'
+      - from: 'neighbor_address'
+        to: 'ip'
+      - from: 'instance_name'
+        to: 'instance'
+      - from: 'af_data/af_name'
+        to: 'afi_safi'
+    fields:
+      - from: 'af_data/prefixes_synced'
+        to: 'installed'
+      - from: 'af_data/prefixes_accepted'
+        to: 'accepted'
+      - from: 'af_data/prefixes_advertised'
+        to: 'sent'
+      - from: 'af_data/prefixes_received'
+        to: 'received'
+      - from: 'af_data/max_prefix_limit'
+        to: 'limit'
+
+  inbuf:
+    tsds_name: input_buffer
+    interval: 30
+
+    metadata:
+      - from: "source"
+        to: "node"
+      - from: "interface_name"
+        to: "intf"
+      - from: "service_policy_name"
+        to: "policy"
+      - from: "class_stats/class_name"
+        to: "class"
+
+    fields:
+      - from: 'class_stats/general_stats/total_drop_rate'
+        to: 'in_drop_bits'
+      - from: 'class_stats/general_stats/total_drop_packets'
+        to: 'in_drop_packets'
+        rate: True
+      - from: 'class_stats/general_stats/pre_policy_matched_packets'
+        to: 'in_pre_policy_packets'
+        rate: True
+      - from: 'class_stats/child_policy/class_stats/general_stats/transmit_bytes'
+        to: 'in_post_policy_bits'
+        rate: True
+      - from: 'class_stats/child_policy/class_stats/general_stats/pre_policy_matched_bytes'
+        to: 'in_pre_policy_bits'
+        rate: True
+
+  outbuf:
+    tsds_name: output_buffer
+    interval: 30
+
+    metadata:
+      - from: "source"
+        to: "node"
+      - from: "interface_name"
+        to: "intf"
+      - from: "service_policy_name"
+        to: "policy"
+      - from: "class_stats/class_name"
+        to: "class"
+
+    fields:
+      - from: 'class_stats/general_stats/total_drop_rate'
+        to: 'out_drop_bits'
+      - from: 'class_stats/general_stats/total_drop_packets'
+        to: 'out_drop_packets'
+        rate: True
+      - from: 'class_stats/general_stats/pre_policy_matched_packets'
+        to: 'out_pre_policy_packets'
+        rate: True
+      - from: 'class_stats/child_policy/class_stats/general_stats/transmit_bytes'
+        to: 'out_post_policy_bits'
+        rate: True
+      - from: 'class_stats/child_policy/class_stats/general_stats/pre_policy_matched_bytes'
+        to: 'out_pre_policy_bits'
+        rate: True
