@@ -1,56 +1,12 @@
 #!/usr/bin/python3
-import sys, re, json, yaml, logging, requests
+import sys, json, yaml, logging, requests
+from re import match, escape
 
 
-if len(sys.argv) < 2:
-    print("Usage: {} <config file>".format(sys.argv[0]))
-    sys.exit(1)
-else:
-    config_file = sys.argv[1]
-
-
-def main():    
-
-    # Read the YAML configuration
-    with open(config_file) as f:
-        config = yaml.load(f)
-
-    # Instantiate a Log, TSDS Push Client, and DataTransform object
-    L    = Log(config.get('logging', {}))
-    TSDS = Client(config.get('tsds'), L)
-    DT   = DataTransformer(config.get('collections'), L)
-
-    L.info('Initialized TSDS-Telegraf execd plugin')
-
-    # Batch array for incoming JSON storage
-    batch = []
-
-    # Process each line from STDIN
-    for line in sys.stdin:
-
-        L.debug('Received input from STDIN')
-
-        # Applies any data transformations and rate calculations
-        # Provides an array of data dicts to add to the batch
-        updates = DT.transform(line)
-
-        if len(updates) == 0:
-            L.warn('Line from STDIN did not produce any update messages: {}'.format(line))
-            continue
-
-        # Adds the resulting TSDS update dicts to the batch
-        batch.extend(updates)
-
-        # Push the updates batch once it has reached an appropriate size
-        if len(batch) >= 10:
-
-            err = TSDS.push(batch)
-            batch = []
-
-            if err:
-                sys.exit(err) 
-
-
+''' Log(config)
+Allows for configurable logging with extra logic applied
+Methods can be expanded for additional logging requirements
+'''
 class Log(object):
 
     def __init__(self, config):
@@ -78,7 +34,8 @@ class Log(object):
         sh.setFormatter(logging.Formatter('[%(name)s] [%(levelname)s]: %(message)s'))
         logger.addHandler(sh)
 
-        self.logger = logger
+        self.logger     = logger
+        self.debug_mode = enable_debug
 
     # Logger Get & Set
     @property
@@ -87,6 +44,14 @@ class Log(object):
     @logger.setter
     def logger(self, logger):
         self.__logger = logger
+
+    # Debug Mode Get & Set
+    @property
+    def debug_mode(self):
+        return self.__debug_mode
+    @debug_mode.setter
+    def debug_mode(self, debug_mode):
+        self.__debug_mode = debug_mode
 
     # Helper method to pretty print data structures
     def _dumper(self, data):
@@ -119,6 +84,10 @@ class Log(object):
         self.logger.error(msg)
 
 
+''' Client(config, Log)
+Allows for easy creation of a configurable web service client
+Currently hard-coded to only support TSDS push services.
+'''
 class Client(object):
 
     def __init__(self, config, log):
@@ -204,9 +173,16 @@ class Client(object):
             self.log.debug(res.text)
         else:
             self.log.info('Pushed {} updates to TSDS'.format(len(data)))
+            if self.log.debug_mode and len(data) > 0:
+                self.log.debug('Sample update from batch:')
+                self.log.debug(data[0])
         return
         
-        
+
+''' DataTransformer(collections, Log)
+Uses configurable definitions to translate Telegraf metrics to TSDS measurements.
+Performs data transormations including rate calculations.
+'''
 class DataTransformer(object):
 
     # More than meets the eye
@@ -254,34 +230,39 @@ class DataTransformer(object):
             self.log.error('Unable to parse JSON string from STDIN, skipping ({}): {}'.format(line, e))
             return output
 
+
         # Get the Telegraf data components
         name      = data.get('name')
         fields    = data.get('fields')
         tags      = data.get('tags')
         timestamp = data.get('timestamp')
-
+        #self.log.debug('Received data for "{}" ({}): {} tags, {} fields'.format(name, timestamp, len(tags),len(fields)))
+            
         # Get the collection configuration by using its name from the data
-        collection = self.collections.get(name)
+        collection = self.collections.get(name, False)
 
         # Check whether the collection type has configurations
         if not collection:
             self.log.error('Collection "{}" is not configured!'.format(name))
             return output
 
-        interval = collection.get('interval')
-
-        # Create a dict of the metadata TSDS names mapped to the values from Telegraf
-        # Telegraf tags are a map of metadata fieldnames to their values
-        metadata = {c.get('to'): tags.get(c.get('from')) for c in collection.get('metadata',[])}
-
         # Initialize a cache for the collection type when it doesn't exist
         if name not in self.cache:
+
+            # The collection's cache has an ordering of all defined metadata keys
+            # Telegraf metrics can contain disjointed data due to async replies or packet sizing
             self.cache[name] = {}
+
+
+        # Get a metadata dictionary
+        metadata = self._parse_metadata(collection, tags)
 
         # Get or create a dict for the metadata combination within the collection type's cache
         # This dict is used for value processing
-        meta_key    = "".join(sorted(metadata.values()))
+        meta_key    = name + '|' + "|".join(sorted(metadata.values()))
         cache_entry = self.cache[name].setdefault(meta_key, {})
+
+        interval = collection.get('interval')
 
         # Use the Telegraf field maps to build value data for TSDS
         values = {}
@@ -296,12 +277,12 @@ class DataTransformer(object):
             # TODO: How should missing field_names be handled?
             # Verify that we have a value for the requested field_name
             if value is None:
-                Log.error('No value for requested field name "{}"'.format(field_name))
+                #self.log.debug('No value for requested field name "{}"'.format(field_name))
                 values[value_name] = value
-                next
+                continue
 
             # Apply rate calculations
-            if field_map.get('rate', False):
+            if 'rate' in field_map:
                 value = self._calculate_rate(\
                     cache_entry,\
                     value_name,\
@@ -369,10 +350,41 @@ class DataTransformer(object):
         return output
 
 
+    def _parse_metadata(self, collection, tags):
+        '''
+        Create a dict of the metadata TSDS names mapped to the values from Telegraf.
+        Telegraf tags are a map of metadata fieldnames to their values.
+        '''
+        metadata = {}
+        errors   = 0
+        for c in collection.get('metadata'):
+             
+            tag_name  = c.get('from')
+            meta_name = c.get('to')
+            optional  = c.get('optional')
+            value     = tags.get(tag_name)
+
+            if value != None:
+                metadata[meta_name] = value
+
+            elif not optional:
+                errors += 1
+
+        if errors:
+            self.log.debug('{} data missing {} metadata values'.format(collection.get('tsds_name'),errors))
+
+        return metadata
+
+
     def _calculate_rate(self, cache_entry, value_name, timestamp, value, interval):
+        '''
+        Calculate a rate value using the current value, last cached value, and interval.
+        '''
 
         if value is None:
             return None
+        else:
+            value = float(value)
 
         (last_timestamp, last_value) = cache_entry.setdefault(value_name, (timestamp, None))
         cache_entry[value_name] = (timestamp, value)
@@ -383,10 +395,8 @@ class DataTransformer(object):
 
         delta = timestamp - last_timestamp;
 
-        # If we DID have a prior entry, we can maybe calc the rate
-
         # Some rough sanity, don't count values that are really old
-        if (delta > 6 * interval):
+        if delta <= 0 or (delta > 6 * interval):
             return None
 
         delta_value = value - last_value;
@@ -401,6 +411,56 @@ class DataTransformer(object):
         rate = delta_value / delta;
         
         return rate;
-        
+    
 
-main()
+''' Main processing loop.
+Takes config file from command-line arguments to configure classes.
+Reads Telegraf JSON input from STDIN and produces TSDS updates in batches.
+'''
+if __name__ == '__main__':
+    
+    if len(sys.argv) < 2:
+        print("Usage: {} <config file>".format(sys.argv[0]))
+        sys.exit(1)
+    else:
+        config_file = sys.argv[1]
+
+        # Read the YAML configuration
+        with open(config_file) as f:
+            config = yaml.load(f)
+
+    # Instantiate the Config, Log, Client, and DataTransform objects
+    L    = Log(config.get('logging'))
+    TSDS = Client(config.get('client'), L)
+    DT   = DataTransformer(config.get('collections'), L)
+
+    L.info('Initialized TSDS-Telegraf execd plugin')
+
+    # Batch array for incoming JSON storage
+    batch = []
+    
+    # Get the number of updates to send in a batch
+    batch_size = config.get('batch_size', 10)
+
+    # Process each line from STDIN
+    for line in sys.stdin:
+
+        # Applies any data transformations and rate calculations
+        # Provides an array of data dicts to add to the batch
+        updates = DT.transform(line)
+
+        if len(updates) == 0:
+            L.warn('Line from STDIN did not produce any update messages: {}'.format(line))
+            continue
+
+        # Adds the resulting TSDS update dicts to the batch
+        batch.extend(updates)
+
+        # Push the updates batch once it has reached an appropriate size
+        if len(batch) >= batch_size:
+
+            err = TSDS.push(batch)
+            batch = []
+
+            if err:
+                sys.exit(err)
