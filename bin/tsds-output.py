@@ -1,7 +1,7 @@
 #!/usr/bin/python3
-import sys, json, yaml, logging, requests
+import sys, json, yaml, logging
 from re import match, escape
-
+from requests import Session, Request
 
 ''' Log(config)
 Allows for configurable logging with extra logic applied
@@ -97,6 +97,11 @@ class Client(object):
         self.url      = config.get('url')
         self.timeout  = config.get('timeout')
 
+        # Create a Session and Request object used for POSTing requests
+        self.session      = Session()
+        self.session.auth = (self.username, self.password)
+        self.request      = self.session.prepare_request(Request('POST', self.url))
+
         self.log = log
         self.log.debug('Initialized Client instance')
 
@@ -133,6 +138,22 @@ class Client(object):
     def timeout(self, timeout):
         self.__timeout = int(timeout) if timeout else 15
 
+    # Session Get & Set
+    @property
+    def session(self):
+        return self.__session
+    @session.setter
+    def session(self, session):
+        self.__session = session
+
+    # Request Get & Set
+    @property
+    def request(self):
+        return self.__request
+    @request.setter
+    def request(self, request):
+        self.__request = request
+
     # Log Get & Set
     @property
     def log(self):
@@ -144,7 +165,7 @@ class Client(object):
     # Takes data and pushes its JSON string to TSDS via POST
     # Return will evaluate to true if an error occurred
     def push(self, data):
-       
+      
         # Stringify the data for POSTing
         try:
             data_str = json.dumps(data)
@@ -157,25 +178,26 @@ class Client(object):
 
         # POST the data to the TSDS push service URL
         try:
-            res = requests.post(\
-                self.url,\
-                data=post_data,\
-                auth=(self.username, self.password),\
-                timeout=self.timeout\
-            )
+
+            # Update the PreparedRequest's data payload
+            self.request.data = post_data
+
+            # Send the prepared POST request
+            res = self.session.send(self.request, timeout=self.timeout)
+
+            # Raise an error when a 4XX or 5XX status code was received
+            res.raise_for_status()
+
         except RuntimeError as e:
+            self.request.data = None
             self.log.error('Error while attempting to POST data: {}'.format(e))
             return 1
 
-        if not res.ok:
-            self.log.error('Received an error response while attempting to POST data: {}'.format(data_str))
-            self.log.debug(res.reason)
-            self.log.debug(res.text)
-        else:
-            self.log.info('Pushed {} updates to TSDS'.format(len(data)))
-            if self.log.debug_mode and len(data) > 0:
-                self.log.debug('Sample update from batch:')
-                self.log.debug(data[0])
+        self.log.info('Pushed {} updates to TSDS'.format(len(data)))
+        if self.log.debug_mode and len(data) > 0:
+            self.log.debug('Sample update from batch:')
+            self.log.debug(data[0])
+
         return
         
 
@@ -312,6 +334,9 @@ class DataTransformer(object):
         has_opt = False
 
         # Check for any optional metadata in the Telegraf tags
+        # TODO: This left in for backward compatability
+        #       but should be adjusted to use the "optional" flag
+        #       for metadata instead
         for opt_meta in collection.get('optional_metadata', []):
 
             tag_name  = opt_meta['from']
