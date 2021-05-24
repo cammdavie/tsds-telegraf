@@ -1,5 +1,7 @@
 #!/usr/bin/python3
-import sys, json, yaml, logging
+import sys, logging
+from yaml import load as load_yaml
+from json import loads as json_loads, dumps as json_dumps
 from re import match, escape
 from requests import Session, Request
 
@@ -56,7 +58,7 @@ class Log(object):
     # Helper method to pretty print data structures
     def _dumper(self, data):
         try:
-            return json.dumps(data)
+            return json_dumps(data)
         except TypeError as e:
             self.logger.error('Could not create data dump for logging: {}'.format(e))
             return data
@@ -168,7 +170,7 @@ class Client(object):
       
         # Stringify the data for POSTing
         try:
-            data_str = json.dumps(data)
+            data_str = json_dumps(data)
         except RuntimeError as e:
             self.log.error('Error while attempting to create JSON string from data: {}\n{}'.format(data, e))
             return 1
@@ -247,7 +249,7 @@ class DataTransformer(object):
 
         # Attempt to load the JSON string as a dict
         try:
-            data = json.loads(json_str)
+            data = json_loads(json_str)
         except RuntimeError as e:
             self.log.error('Unable to parse JSON string from STDIN, skipping ({}): {}'.format(line, e))
             return output
@@ -452,7 +454,7 @@ if __name__ == '__main__':
 
         # Read the YAML configuration
         with open(config_file) as f:
-            config = yaml.load(f)
+            config = load_yaml(f)
 
     # Instantiate the Config, Log, Client, and DataTransform objects
     L    = Log(config.get('logging'))
