@@ -102,7 +102,6 @@ class Client(object):
         # Create a Session and Request object used for POSTing requests
         self.session      = Session()
         self.session.auth = (self.username, self.password)
-        self.request      = self.session.prepare_request(Request('POST', self.url))
 
         self.log = log
         self.log.debug('Initialized Client instance')
@@ -182,10 +181,11 @@ class Client(object):
         try:
 
             # Update the PreparedRequest's data payload
-            self.request.data = post_data
+            req = Request('POST', self.url, data=post_data)
+            req = self.session.prepare_request(req)
 
             # Send the prepared POST request
-            res = self.session.send(self.request, timeout=self.timeout)
+            res = self.session.send(req, timeout=self.timeout)
 
             # Raise an error when a 4XX or 5XX status code was received
             res.raise_for_status()
@@ -194,7 +194,7 @@ class Client(object):
             self.request.data = None
             self.log.error('Error while attempting to POST data: {}'.format(e))
             return 1
-
+    
         self.log.info('Pushed {} updates to TSDS'.format(len(data)))
         if self.log.debug_mode and len(data) > 0:
             self.log.debug('Sample update from batch:')
