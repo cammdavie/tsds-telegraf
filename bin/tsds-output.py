@@ -254,14 +254,28 @@ class DataTransformer(object):
             self.log.error('Unable to parse JSON string from STDIN, skipping ({}): {}'.format(line, e))
             return output
 
-
         # Get the Telegraf data components
         name      = data.get('name')
         fields    = data.get('fields')
         tags      = data.get('tags')
         timestamp = data.get('timestamp')
-        #self.log.debug('Received data for "{}" ({}): {} tags, {} fields'.format(name, timestamp, len(tags),len(fields)))
-            
+        
+        # Verify data components are present
+        verify_err  = 'Received data with missing component(s): {}'
+        verify_miss = []
+        if name == None:
+            verify_miss.append('"name"')
+        if fields == None:
+            verify_miss.append('"fields"')
+        if tags == None:
+            verify_miss.append('"tags"')          
+        if timestamp == None:
+            verify_miss.append('"timestamp"')
+        # Log an error and return the empty output array 
+        if len(verify_miss) > 0:
+            self.log.error(verify_err.format(', '.join(verify_miss)))
+            return output
+
         # Get the collection configuration by using its name from the data
         collection = self.collections.get(name, False)
 
@@ -277,9 +291,10 @@ class DataTransformer(object):
             # Telegraf metrics can contain disjointed data due to async replies or packet sizing
             self.cache[name] = {}
 
-
         # Get a metadata dictionary
-        metadata = self._parse_metadata(collection, tags)
+        metadata, meta_errors = self._parse_metadata(collection, tags)
+        if meta_errors:
+            return output
 
         # Get or create a dict for the metadata combination within the collection type's cache
         # This dict is used for value processing
@@ -300,9 +315,9 @@ class DataTransformer(object):
 
             # TODO: How should missing field_names be handled?
             # Verify that we have a value for the requested field_name
-            if value is None:
+            if value == None:
                 #self.log.debug('No value for requested field name "{}"'.format(field_name))
-                values[value_name] = value
+                values[value_name] = None
                 continue
 
             # Apply rate calculations
@@ -310,9 +325,10 @@ class DataTransformer(object):
                 value = self._calculate_rate(\
                     cache_entry,\
                     value_name,\
-                    timestamp,\
+                    int(timestamp),\
                     value,\
-                    collection.get('interval')\
+                    interval,\
+                    meta_key\
                 )
 
             # Set the value data for the TSDS value name
@@ -321,9 +337,9 @@ class DataTransformer(object):
         # Create a dict of data to push to TSDS and add it to the output
         tsds_data = {
             "meta":     metadata,
-            "time":     timestamp,
+            "time":     int(timestamp),
             "values":   values,
-            "interval": collection.get('interval'),
+            "interval": interval,
             "type":     collection.get('tsds_name')
         }
         output.append(tsds_data)
@@ -400,44 +416,54 @@ class DataTransformer(object):
         if errors:
             self.log.debug('{} data missing {} metadata values'.format(collection.get('tsds_name'),errors))
 
-        return metadata
+        return metadata, errors
 
 
-    def _calculate_rate(self, cache_entry, value_name, timestamp, value, interval):
+    def _calculate_rate(self, cache_entry, value_name, timestamp, value, interval, meta_key):
         '''
         Calculate a rate value using the current value, last cached value, and interval.
         '''
 
-        if value is None:
-            return None
-        else:
-            value = float(value)
-
+        # Retrieve data from the cache
         (last_timestamp, last_value) = cache_entry.setdefault(value_name, (timestamp, None))
         cache_entry[value_name] = (timestamp, value)
 
-        # If we didn't have any prior entries, can't calculate
-        if last_value is None:
+        # No current value or no previous value we return after updating the cache
+        if value == None or last_value == None:
             return None
 
-        delta = timestamp - last_timestamp;
+        # Ensure the value is a float for calculations
+        value = float(value)
 
-        # Some rough sanity, don't count values that are really old
-        if delta <= 0 or (delta > 6 * interval):
+        # Calculate the time delta
+        delta = int(timestamp - last_timestamp)
+
+        # Handle errors where the delta value is negative or zero
+        if delta <= 0:
             return None
 
-        delta_value = value - last_value;
+        # Check whether the delta falls within an expected time interval
+        if delta > interval:
+            msg = 'ERROR: Rate delta exceeds expected interval for key "{}" [INTERVAL {} | DELTA {} | CURRENT {} | LAST {}]'
+            self.log.error(msg.format(meta_key, interval, delta, timestamp, last_timestamp))
 
-        # Handle overflow / reset here, counters shouldn't go down normally
+        # Calculate the change in the value
+        delta_value = value - last_value
+
+        # Handle counter overflow/reset here
         if value < last_value:
+
+            # 64-bit counters
             if value > 2**32:
-                delta_value = 2**64 - last_value + value;            
+                delta_value = 2**64 - last_value + value
+            # 32-bit counters
             else:
-                delta_value = 2**32 - last_value + value;
+                delta_value = 2**32 - last_value + value
         
-        rate = delta_value / delta;
+        # Calculate the rate
+        rate = delta_value / delta
         
-        return rate;
+        return rate
     
 
 ''' Main processing loop.
@@ -490,4 +516,4 @@ if __name__ == '__main__':
             batch = []
 
             if err:
-                sys.exit(err)
+                sys.exit()
