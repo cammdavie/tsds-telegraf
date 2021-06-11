@@ -117,15 +117,6 @@ class Client(object):
             self.url = environ[url_env_var]
 
 
-
-        print("testing env vars")
-
-        print("user = " + self.username)
-        print("pass = " + self.password)
-        print("url = " + self.url)
-        print("timeout = " + str(self.timeout))
-
-
         # Create a Session and Request object used for POSTing requests
         self.session      = Session()
         self.session.auth = (self.username, self.password)
